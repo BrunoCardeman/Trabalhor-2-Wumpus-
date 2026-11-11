@@ -1,0 +1,16 @@
+  Se o agente estiver em uma sala que possui "brilho" (ouro) ou `reflexo` (cura), 
+a ação deve ser obrigatoriamente "pegar".
+
+  Se a célula logo à frente do agente for "segura" (conhecida como limpa ou sem perigos) e ainda não foi visitada,
+a ação deve ser "andar".
+
+  Se a célula à frente não for segura ou já tiver sido visitada, mas houver outra célula vizinha (à esquerda, à direita ou atrás) 
+que seja segura e não visitada, o agente deve girar (**`virar_direita`** ou **`virar_esquerda`**) 
+até ficar apontado para essa célula segura.
+
+  O gente nunca deve escolher andar em direção a uma célula vizinha que possua suspeita ativa ou certeza de risco   
+(como poços com brisa `P`, inimigos com passos `D`/`d`, ou teletransportadores com palmas `T`).
+
+  Se todas as células vizinhas imediatas já tiverem sido visitadas ou apresentarem risco, 
+o agente deve usar o histórico de posições já percorridas "visitado/2" para recuar por um caminho seguro conhecido 
+e procurar novas ramificações no labirinto.
