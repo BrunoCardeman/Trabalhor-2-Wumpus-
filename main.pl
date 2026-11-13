@@ -251,10 +251,19 @@ show_mem(_,0) :- energia(E), pontuacao(P), write('E: '), write(E), write('   P: 
 %executa_acao(pegar) :- posicao(PX, PY,_), tem_ouro(PX, PY), !.
 %executa_acao(voltar) :- peguei_todos_ouros,!.
 
+tem_perigo(Lista) :- member(brisa, Lista) ; member(palmas, Lista) ; member(passos, Lista).
 
-%verifica se tem outro ou algo para curar a vida
-executa_acao(pegar):- posicao(X,Y, _), memory(X,Y, Lista), member(brilho, Lista).
-executa_acao(pegar):- posicao(X,Y, _), memory(X,Y, Lista), member(reflexo, Lista), energia(E), E < 100.
+olhando_para_parede(1, _, oeste).
+olhando_para_parede(12, _, leste).
+olhando_para_parede(_, 1, sul).
+olhando_para_parede(_, 12, norte).
 
+casa_frente(X, Y, norte, X, FY) :- FY is Y + 1.
+casa_frente(X, Y, sul, X, FY) :- FY is Y - 1.
+casa_frente(X, Y, leste, FX, Y) :- FX is X + 1.
+casa_frente(X, Y, oeste, FX, Y) :- FX is X - 1.
 
-
+executa_acao(pegar) :- posicao(X, Y, _), memory(X, Y, Lista), member(brilho, Lista).
+executa_acao(pegar) :- posicao(X, Y, _), memory(X, Y, Lista), member(reflexo, Lista), energia(E), E < 100.
+executa_acao(andar) :- posicao(X, Y, Dir), memory(X, Y, Lista), \+ tem_perigo(Lista), \+ olhando_para_parede(X, Y, Dir), casa_frente(X, Y, Dir, Fx, Fy), \+ visitado(Fx, Fy).
+executa_acao(andar) :- posicao(X, Y, Dir), memory(X, Y, Lista), \+ tem_perigo(Lista), \+ olhando_para_parede(X, Y, Dir), casa_frente(X, Y, Dir, Fx, Fy), visitado(Fx, Fy).
