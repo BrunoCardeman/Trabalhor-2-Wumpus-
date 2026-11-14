@@ -267,3 +267,99 @@ executa_acao(pegar) :- posicao(X, Y, _), memory(X, Y, Lista), member(brilho, Lis
 executa_acao(pegar) :- posicao(X, Y, _), memory(X, Y, Lista), member(reflexo, Lista), energia(E), E < 100.
 executa_acao(andar) :- posicao(X, Y, Dir), memory(X, Y, Lista), \+ tem_perigo(Lista), \+ olhando_para_parede(X, Y, Dir), casa_frente(X, Y, Dir, Fx, Fy), \+ visitado(Fx, Fy).
 executa_acao(andar) :- posicao(X, Y, Dir), memory(X, Y, Lista), \+ tem_perigo(Lista), \+ olhando_para_parede(X, Y, Dir), casa_frente(X, Y, Dir, Fx, Fy), visitado(Fx, Fy).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% LOGICA DO AGENTE
+%% executa_acao/1 chamado pelo Python.
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%% Anota no mapa em todas as adjacencias se tem brisa, palmas ou passos
+
+tem_perigo(Lista) :- member(brisa, Lista) ; member(palmas, Lista) ; member(passos, Lista).
+
+casa_frente(X, Y, norte, X, FY) :- FY is Y + 1.
+casa_frente(X, Y, sul, X, FY) :- FY is Y - 1.
+casa_frente(X, Y, leste, FX, Y) :- FX is X + 1.
+casa_frente(X, Y, oeste, FX, Y) :- FX is X - 1.
+
+% Antes o tamanho 12 era fixo; agora usa map_size/2
+olhando_para_parede(X, Y, Dir) :- casa_frente(X, Y, Dir, Fx, Fy), \+ dentro(Fx, Fy).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%  Geometria 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+dentro(X, Y) :- map_size(MX, MY), X >= 1, X =< MX, Y >= 1, Y =< MY.
+
+vizinho(X, Y, X2, Y) :- X2 is X + 1, dentro(X2, Y).
+vizinho(X, Y, X2, Y) :- X2 is X - 1, dentro(X2, Y).
+vizinho(X, Y, X, Y2) :- Y2 is Y + 1, dentro(X, Y2).
+vizinho(X, Y, X, Y2) :- Y2 is Y - 1, dentro(X, Y2).
+
+dir_direita(norte, leste).
+dir_direita(leste, sul).
+dir_direita(sul, oeste).
+dir_direita(oeste, norte).
+dir_esquerda(D2, D) :- dir_direita(D, D2).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%  Base de conhecimento do agente 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% obs(X,Y,Lista): o que o agente SENTIU (brisa/palmas/passos) estando em (X,Y)
+:- dynamic obs/3.
+
+reset_agente :- retractall(obs(_,_,_)).
+:- reset_agente.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%  Sensores  
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+sentir(L) :- observacoes(L).
+
+percepcao_local(L) :- posicao(X, Y, _), tile(X, Y, Z), findall(P, observacao_loc(P, [Z]), L).
+local(P) :- percepcao_local(L), memberchk(P, L).
+
+% Percebe os sentidos da casa nova e registra no mapa
+perceber :-
+    posicao(X, Y, D), D \== morto,
+    (   obs(X, Y, _) -> true
+    ;   sentir(L), assertz(obs(X, Y, L))
+    ).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%  Inferencia 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+conhecida(X, Y) :- obs(X, Y, _).
+
+seguro(X, Y) :- conhecida(X, Y), !.
+seguro(X, Y) :- vizinho(X, Y, A, B), obs(A, B, L), \+ tem_perigo(L), !.
+
+% casa segura que ainda não visitamos
+nova_segura(X, Y) :- dentro(X, Y), \+ conhecida(X, Y), seguro(X, Y).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%  Decisoes
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% Caso 1) Se tiver ouro no locar -> pega o ouro
+decide(pegar) :- local(brilho).
+
+% 2) Se tiver item de energia (e a energia esta baixa < 50) -> pega a energia
+decide(pegar) :- local(reflexo), energia(E), E =< 50.
+
+% 3) Se a casa na frente e segura -> anda pra frente
+decide(andar) :- posicao(X, Y, Dir), casa_frente(X, Y, Dir, Fx, Fy), nova_segura(Fx, Fy).
+
+% 4) Se a casa segura nao for na frente -> vira
+decide(virar_direita) :- posicao(X, Y, Dir), dir_direita(Dir, D2), casa_frente(X, Y, D2, Fx, Fy), nova_segura(Fx, Fy).
+decide(virar_esquerda) :- posicao(X, Y, Dir), dir_esquerda(Dir, D2), casa_frente(X, Y, D2, Fx, Fy), nova_segura(Fx, Fy).
+decide(virar_direita) :- posicao(X, Y, Dir), dir_direita(Dir, D1), dir_direita(D1, D2), casa_frente(X, Y, D2, Fx, Fy), nova_segura(Fx, Fy).
+
+% 5) sem casa nova segura vizinha: FALHA (agente para).
+% TODO: voltar por casas conhecidas até uma casa com vizinha nova e segura. (Chamar o A*?)
+
+% Ponto de entrada chamado pelo Python
+executa_acao(Acao) :- perceber, decide(Acao), !.
