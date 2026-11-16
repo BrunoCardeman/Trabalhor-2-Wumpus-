@@ -251,22 +251,15 @@ show_mem(_,0) :- energia(E), pontuacao(P), write('E: '), write(E), write('   P: 
 %executa_acao(pegar) :- posicao(PX, PY,_), tem_ouro(PX, PY), !.
 %executa_acao(voltar) :- peguei_todos_ouros,!.
 
-tem_perigo(Lista) :- member(brisa, Lista) ; member(palmas, Lista) ; member(passos, Lista).
-
 olhando_para_parede(1, _, oeste).
 olhando_para_parede(12, _, leste).
 olhando_para_parede(_, 1, sul).
 olhando_para_parede(_, 12, norte).
 
-casa_frente(X, Y, norte, X, FY) :- FY is Y + 1.
-casa_frente(X, Y, sul, X, FY) :- FY is Y - 1.
-casa_frente(X, Y, leste, FX, Y) :- FX is X + 1.
-casa_frente(X, Y, oeste, FX, Y) :- FX is X - 1.
-
-executa_acao(pegar) :- posicao(X, Y, _), memory(X, Y, Lista), member(brilho, Lista).
-executa_acao(pegar) :- posicao(X, Y, _), memory(X, Y, Lista), member(reflexo, Lista), energia(E), E < 100.
-executa_acao(andar) :- posicao(X, Y, Dir), memory(X, Y, Lista), \+ tem_perigo(Lista), \+ olhando_para_parede(X, Y, Dir), casa_frente(X, Y, Dir, Fx, Fy), \+ visitado(Fx, Fy).
-executa_acao(andar) :- posicao(X, Y, Dir), memory(X, Y, Lista), \+ tem_perigo(Lista), \+ olhando_para_parede(X, Y, Dir), casa_frente(X, Y, Dir, Fx, Fy), visitado(Fx, Fy).
+%executa_acao(pegar) :- posicao(X, Y, _), memory(X, Y, Lista), member(brilho, Lista).
+%executa_acao(pegar) :- posicao(X, Y, _), memory(X, Y, Lista), member(reflexo, Lista), energia(E), E < 100.
+%executa_acao(andar) :- posicao(X, Y, Dir), memory(X, Y, Lista), \+ tem_perigo(Lista), \+ olhando_para_parede(X, Y, Dir), casa_frente(X, Y, Dir, Fx, Fy), \+ visitado(Fx, Fy).
+%executa_acao(andar) :- posicao(X, Y, Dir), memory(X, Y, Lista), \+ tem_perigo(Lista), \+ olhando_para_parede(X, Y, Dir), casa_frente(X, Y, Dir, Fx, Fy), visitado(Fx, Fy).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% LOGICA DO AGENTE
@@ -340,26 +333,58 @@ seguro(X, Y) :- vizinho(X, Y, A, B), obs(A, B, L), \+ tem_perigo(L), !.
 % casa segura que ainda não visitamos
 nova_segura(X, Y) :- dentro(X, Y), \+ conhecida(X, Y), seguro(X, Y).
 
+% Uma casa é segura se já é conhecida OU se é vizinha de alguma casa sem perigos
+segura(X, Y) :- conhecida(X, Y), !.
+segura(X, Y) :- vizinho(X, Y, A, B), obs(A, B, L), \+ tem_perigo(L), !.
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%  Decisoes
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-% Caso 1) Se tiver ouro no locar -> pega o ouro
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%  Decisoes
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+% Caso 1) Se tiver ouro no local -> pega o ouro
 decide(pegar) :- local(brilho).
 
-% 2) Se tiver item de energia (e a energia esta baixa < 50) -> pega a energia
+% 2) Se tiver item de energia (e a energia está baixa <= 50) -> pega a energia
 decide(pegar) :- local(reflexo), energia(E), E =< 50.
 
-% 3) Se a casa na frente e segura -> anda pra frente
+% --- PLANO A: EXPLORAÇÃO DE CASAS NOVAS (Prioridade Máxima) ---
+% 3) Se a casa na frente é nova e segura -> anda pra frente
 decide(andar) :- posicao(X, Y, Dir), casa_frente(X, Y, Dir, Fx, Fy), nova_segura(Fx, Fy).
 
-% 4) Se a casa segura nao for na frente -> vira
+% 4) Se a casa nova e segura não for na frente -> vira para procurá-la
 decide(virar_direita) :- posicao(X, Y, Dir), dir_direita(Dir, D2), casa_frente(X, Y, D2, Fx, Fy), nova_segura(Fx, Fy).
 decide(virar_esquerda) :- posicao(X, Y, Dir), dir_esquerda(Dir, D2), casa_frente(X, Y, D2, Fx, Fy), nova_segura(Fx, Fy).
 decide(virar_direita) :- posicao(X, Y, Dir), dir_direita(Dir, D1), dir_direita(D1, D2), casa_frente(X, Y, D2, Fx, Fy), nova_segura(Fx, Fy).
 
-% 5) sem casa nova segura vizinha: FALHA (agente para).
-% TODO: voltar por casas conhecidas até uma casa com vizinha nova e segura. (Chamar o A*?)
+% --- PLANO B: RECUO SEGURO (Backtracking por casas já conhecidas) ---
+% 1) Tenta girar para ver se há caminhos em casas conhecidas e seguras aos lados
+decide(virar_direita) :- posicao(X, Y, Dir), dir_direita(Dir, D2), casa_frente(X, Y, D2, Fx, Fy), segura(Fx, Fy), conhecida(Fx, Fy).
+decide(virar_esquerda) :- posicao(X, Y, Dir), dir_esquerda(Dir, D2), casa_frente(X, Y, D2, Fx, Fy), segura(Fx, Fy), conhecida(Fx, Fy).
+
+% 2) Só anda para trás se a casa da frente for comprovadamente SEGURA e já CONHECIDA
+decide(andar) :- 
+    posicao(X, Y, Dir), 
+    casa_frente(X, Y, Dir, Fx, Fy), 
+    segura(Fx, Fy), 
+    conhecida(Fx, Fy).
+
+% --- PLANO C: REDE DE SEGURANÇA FINAL (Sem Suicídio) ---
+% Se absolutamente nenhuma regra acima puder ser acionada, 
+% em vez de andar para a morte ou crashar o programa, 
+% o agente apenas vira à direita para reavaliar os sensores de outro ângulo.
+decide(virar_direita).
 
 % Ponto de entrada chamado pelo Python
-executa_acao(Acao) :- perceber, decide(Acao), !.
+% Ponto de entrada chamado pelo Python (com memória de posição)
+executa_acao(Acao) :- 
+    posicao(X, Y, _),           % Salva onde o agente está agora
+    perceber, 
+    decide(Acao), 
+    retractall(anterior(_, _)), % Limpa a posição anterior antiga
+    assertz(anterior(X, Y)),    % Guarda a posição atual como a "anterior" para o próximo turno
+    !.
