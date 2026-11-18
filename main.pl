@@ -251,11 +251,6 @@ show_mem(_,0) :- energia(E), pontuacao(P), write('E: '), write(E), write('   P: 
 %executa_acao(pegar) :- posicao(PX, PY,_), tem_ouro(PX, PY), !.
 %executa_acao(voltar) :- peguei_todos_ouros,!.
 
-olhando_para_parede(1, _, oeste).
-olhando_para_parede(12, _, leste).
-olhando_para_parede(_, 1, sul).
-olhando_para_parede(_, 12, norte).
-
 %executa_acao(pegar) :- posicao(X, Y, _), memory(X, Y, Lista), member(brilho, Lista).
 %executa_acao(pegar) :- posicao(X, Y, _), memory(X, Y, Lista), member(reflexo, Lista), energia(E), E < 100.
 %executa_acao(andar) :- posicao(X, Y, Dir), memory(X, Y, Lista), \+ tem_perigo(Lista), \+ olhando_para_parede(X, Y, Dir), casa_frente(X, Y, Dir, Fx, Fy), \+ visitado(Fx, Fy).
@@ -267,8 +262,6 @@ olhando_para_parede(_, 12, norte).
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 %% Anota no mapa em todas as adjacencias se tem brisa, palmas ou passos
-
-tem_perigo(Lista) :- member(brisa, Lista) ; member(palmas, Lista) ; member(passos, Lista).
 
 casa_frente(X, Y, norte, X, FY) :- FY is Y + 1.
 casa_frente(X, Y, sul, X, FY) :- FY is Y - 1.
@@ -299,10 +292,12 @@ dir_esquerda(D2, D) :- dir_direita(D, D2).
 %%  Base de conhecimento do agente 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-% obs(X,Y,Lista): o que o agente SENTIU (brisa/palmas/passos) estando em (X,Y)
-:- dynamic obs/3.
+:- dynamic obs/3, inimigo_em/3, energia_ant/1, fim_de_jogo/0, n_acoes/1, n_ouro/1.
 
-reset_agente :- retractall(obs(_,_,_)).
+reset_agente :- retractall(obs(_,_,_)), retractall(inimigo_em(_,_,_)),
+    retractall(energia_ant(_)), retractall(fim_de_jogo),
+    retractall(n_acoes(_)), retractall(n_ouro(_)),
+    assertz(n_acoes(0)), assertz(n_ouro(0)).
 :- reset_agente.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -310,81 +305,92 @@ reset_agente :- retractall(obs(_,_,_)).
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 sentir(L) :- observacoes(L).
-
 percepcao_local(L) :- posicao(X, Y, _), tile(X, Y, Z), findall(P, observacao_loc(P, [Z]), L).
 local(P) :- percepcao_local(L), memberchk(P, L).
 
-% Percebe os sentidos da casa nova e registra no mapa
-perceber :-
-    posicao(X, Y, D), D \== morto,
-    (   obs(X, Y, _) -> true
-    ;   sentir(L), assertz(obs(X, Y, L))
-    ).
+perceber :- posicao(X, Y, _),
+    ( obs(X, Y, _) -> true ; sentir(L), assertz(obs(X, Y, L)) ).
+
+detecta_dano :- posicao(X, Y, _), energia(E),
+    ( energia_ant(EA), E < EA, \+ inimigo_em(X, Y, _) ->
+        Dano is EA - E, ( Dano < 50 -> Max = 50 ; Max = 80 ),
+        assertz(inimigo_em(X, Y, Max))
+    ; true ),
+    retractall(energia_ant(_)), assertz(energia_ant(E)).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%  Inferencia 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
 conhecida(X, Y) :- obs(X, Y, _).
 
-seguro(X, Y) :- conhecida(X, Y), !.
-seguro(X, Y) :- vizinho(X, Y, A, B), obs(A, B, L), \+ tem_perigo(L), !.
+% (X,Y) com certeza NAO tem o perigo que causa o sensor S
+% se alguma vizinha visitada NAO sentiu S
+sem(S, X, Y) :- vizinho(X, Y, A, B), obs(A, B, L), \+ memberchk(S, L), !.
 
-% casa segura que ainda não visitamos
-nova_segura(X, Y) :- dentro(X, Y), \+ conhecida(X, Y), seguro(X, Y).
+segura(X, Y) :- conhecida(X, Y), !, \+ inimigo_em(X, Y, _).
+segura(X, Y) :- sem(brisa, X, Y), sem(palmas, X, Y), sem(passos, X, Y).
 
-% Uma casa é segura se já é conhecida OU se é vizinha de alguma casa sem perigos
-segura(X, Y) :- conhecida(X, Y), !.
-segura(X, Y) :- vizinho(X, Y, A, B), obs(A, B, L), \+ tem_perigo(L), !.
+% casas ainda nao visitadas, vizinhas de uma visitada
+fronteira(X, Y) :- map_size(MX, MY), between(1, MX, X), between(1, MY, Y),
+    \+ conhecida(X, Y), once((vizinho(X, Y, A, B), conhecida(A, B))).
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%%  Decisoes
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Poco CERTO: uma vizinha sentiu brisa e (X,Y) e a UNICA candidata
+poco_certo(X, Y) :- vizinho(X, Y, A, B), obs(A, B, L), memberchk(brisa, L),
+    findall(C-D, (vizinho(A, B, C, D), \+ conhecida(C, D), \+ sem(brisa, C, D)), [X-Y]), !.
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%%  Decisoes
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% a brisa sentida em (A,B) ja e explicada por um poco certo
+explicada(A, B) :- vizinho(A, B, C, D), poco_certo(C, D), !.
 
+% risco = quantas brisas "nao explicadas" apontam para (X,Y)
+risco(X, Y, R) :- aggregate_all(count,
+    (vizinho(X, Y, A, B), obs(A, B, L), memberchk(brisa, L), \+ explicada(A, B)), R).
 
-% Caso 1) Se tiver ouro no local -> pega o ouro
-decide(pegar) :- local(brilho).
+alvos_seguros(L) :- findall(X-Y, (fronteira(X, Y), segura(X, Y)), L), L \== [].
 
-% 2) Se tiver item de energia (e a energia está baixa <= 50) -> pega a energia
-decide(pegar) :- local(reflexo), energia(E), E =< 50.
+alvos_arriscados(L) :-
+    findall(R-(X-Y), (fronteira(X, Y), \+ poco_certo(X, Y),
+                      sem(palmas, X, Y), sem(passos, X, Y), risco(X, Y, R)), Ps),
+    keysort(Ps, [Min-_|_]), Min =< 1,
+    findall(P, member(Min-P, Ps), L).
 
-% --- PLANO A: EXPLORAÇÃO DE CASAS NOVAS (Prioridade Máxima) ---
-% 3) Se a casa na frente é nova e segura -> anda pra frente
-decide(andar) :- posicao(X, Y, Dir), casa_frente(X, Y, Dir, Fx, Fy), nova_segura(Fx, Fy).
+caminho(Alvos, Caminho) :- posicao(X, Y, _),
+    bfs([[X-Y]], [X-Y], Alvos, Rev), reverse(Rev, Caminho).
 
-% 4) Se a casa nova e segura não for na frente -> vira para procurá-la
-decide(virar_direita) :- posicao(X, Y, Dir), dir_direita(Dir, D2), casa_frente(X, Y, D2, Fx, Fy), nova_segura(Fx, Fy).
-decide(virar_esquerda) :- posicao(X, Y, Dir), dir_esquerda(Dir, D2), casa_frente(X, Y, D2, Fx, Fy), nova_segura(Fx, Fy).
-decide(virar_direita) :- posicao(X, Y, Dir), dir_direita(Dir, D1), dir_direita(D1, D2), casa_frente(X, Y, D2, Fx, Fy), nova_segura(Fx, Fy).
+bfs([[P|Ps]|_], _, Alvos, [P|Ps]) :- memberchk(P, Alvos), !.
+bfs([[X-Y|Ps]|Fila], Vis, Alvos, Cam) :-
+    findall([NX-NY, X-Y|Ps],
+        ( vizinho(X, Y, NX, NY), \+ memberchk(NX-NY, Vis),
+          ( memberchk(NX-NY, Alvos) -> true ; passavel(NX, NY) ) ), Novos),
+    findall(N, member([N|_], Novos), Ns), append(Vis, Ns, Vis2),
+    append(Fila, Novos, Fila2), bfs(Fila2, Vis2, Alvos, Cam).
 
-% --- PLANO B: RECUO SEGURO (Backtracking por casas já conhecidas) ---
-% 1) Tenta girar para ver se há caminhos em casas conhecidas e seguras aos lados
-decide(virar_direita) :- posicao(X, Y, Dir), dir_direita(Dir, D2), casa_frente(X, Y, D2, Fx, Fy), segura(Fx, Fy), conhecida(Fx, Fy).
-decide(virar_esquerda) :- posicao(X, Y, Dir), dir_esquerda(Dir, D2), casa_frente(X, Y, D2, Fx, Fy), segura(Fx, Fy), conhecida(Fx, Fy).
+passavel(X, Y) :- conhecida(X, Y), \+ inimigo_em(X, Y, _).
 
-% 2) Só anda para trás se a casa da frente for comprovadamente SEGURA e já CONHECIDA
-decide(andar) :- 
-    posicao(X, Y, Dir), 
-    casa_frente(X, Y, Dir, Fx, Fy), 
-    segura(Fx, Fy), 
-    conhecida(Fx, Fy).
+primeiro_passo([_, NX-NY|_], Acao) :- posicao(X, Y, D),
+    casa_frente(X, Y, ND, NX, NY), !, virar_para(D, ND, Acao).
 
-% --- PLANO C: REDE DE SEGURANÇA FINAL (Sem Suicídio) ---
-% Se absolutamente nenhuma regra acima puder ser acionada, 
-% em vez de andar para a morte ou crashar o programa, 
-% o agente apenas vira à direita para reavaliar os sensores de outro ângulo.
-decide(virar_direita).
+virar_para(D, D, andar) :- !.
+virar_para(D, ND, virar_direita) :- dir_direita(D, ND), !.
+virar_para(D, ND, virar_esquerda) :- dir_esquerda(D, ND), !.
+virar_para(_, _, virar_direita).          % casa atras: vira duas vezes
 
-% Ponto de entrada chamado pelo Python
-% Ponto de entrada chamado pelo Python (com memória de posição)
-executa_acao(Acao) :- 
-    posicao(X, Y, _),           % Salva onde o agente está agora
-    perceber, 
-    decide(Acao), 
-    retractall(anterior(_, _)), % Limpa a posição anterior antiga
-    assertz(anterior(X, Y)),    % Guarda a posição atual como a "anterior" para o próximo turno
-    !.
+ir_para(Alvos, Acao) :- caminho(Alvos, C), primeiro_passo(C, Acao).
+
+decide(pegar) :- local(brilho), !.
+decide(pegar) :- local(reflexo), energia(E), E =< 50, !.
+decide(A) :- alvos_seguros(L), ir_para(L, A), !.
+decide(A) :- alvos_arriscados(L), ir_para(L, A), !.
+decide(A) :- posicao(X, Y, _), X-Y \== 1-1, ir_para([1-1], A), !.
+decide(sair).
+conta(A) :- ( A == pegar, local(brilho) ->
+                retract(n_ouro(O)), O1 is O+1, assertz(n_ouro(O1)) ; true ),
+    retract(n_acoes(N)), N1 is N+1, assertz(n_acoes(N1)).
+
+sair :- ( fim_de_jogo -> true ; assertz(fim_de_jogo), relatorio ).
+relatorio :- pontuacao(P), energia(E), n_ouro(O), n_acoes(N),
+    format("FIM | pontuacao=~w ouro=~w energia=~w acoes=~w~n", [P, O, E, N]).
+
+executa_acao(sair) :- fim_de_jogo, !.
+executa_acao(A) :- posicao(_, _, D), D \== morto,
+    detecta_dano, perceber, decide(A), conta(A), !.
+executa_acao(sair).
