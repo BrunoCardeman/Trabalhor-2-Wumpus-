@@ -292,13 +292,24 @@ dir_esquerda(D2, D) :- dir_direita(D, D2).
 %%  Base de conhecimento do agente 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-:- dynamic obs/3, inimigo_em/3, energia_ant/1, fim_de_jogo/0, n_acoes/1, n_ouro/1.
+:- dynamic obs/3, inimigo_em/3, teleporte_em/2, reflexo_em/2, ultimo/4,
+           energia_ant/1, fim_de_jogo/0, n_acoes/1, n_ouro/1.
 
 reset_agente :- retractall(obs(_,_,_)), retractall(inimigo_em(_,_,_)),
-    retractall(energia_ant(_)), retractall(fim_de_jogo),
-    retractall(n_acoes(_)), retractall(n_ouro(_)),
+    retractall(teleporte_em(_,_)), retractall(reflexo_em(_,_)),
+    retractall(ultimo(_,_,_,_)), retractall(energia_ant(_)),
+    retractall(fim_de_jogo), retractall(n_acoes(_)), retractall(n_ouro(_)),
     assertz(n_acoes(0)), assertz(n_ouro(0)).
 :- reset_agente.
+
+% Conhecimento do enunciado: o mapa tem 3 ouros e o maior dano de um inimigo e 80
+total_ouros(3).
+dano_maximo(80).
+
+% Cada tipo de perigo e o sensor que ele dispara nas casas vizinhas
+sensor(poco, brisa).
+sensor(inimigo, passos).
+sensor(teleporte, palmas).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%  Sensores  
@@ -308,9 +319,12 @@ sentir(L) :- observacoes(L).
 percepcao_local(L) :- posicao(X, Y, _), tile(X, Y, Z), findall(P, observacao_loc(P, [Z]), L).
 local(P) :- percepcao_local(L), memberchk(P, L).
 
+% Guarda o que foi sentido na casa e lembra onde viu um item de energia (reflexo)
 perceber :- posicao(X, Y, _),
-    ( obs(X, Y, _) -> true ; sentir(L), assertz(obs(X, Y, L)) ).
+    ( obs(X, Y, _) -> true ; sentir(L), assertz(obs(X, Y, L)) ),
+    ( local(reflexo), \+ reflexo_em(X, Y) -> assertz(reflexo_em(X, Y)) ; true ).
 
+% Perdeu energia sem ter um inimigo conhecido aqui -> existe um inimigo nesta casa
 detecta_dano :- posicao(X, Y, _), energia(E),
     ( energia_ant(EA), E < EA, \+ inimigo_em(X, Y, _) ->
         Dano is EA - E, ( Dano < 50 -> Max = 50 ; Max = 80 ),
@@ -318,40 +332,94 @@ detecta_dano :- posicao(X, Y, _), energia(E),
     ; true ),
     retractall(energia_ant(_)), assertz(energia_ant(E)).
 
+% Andou para (FX,FY) mas "acordou" em outro lugar -> (FX,FY) e um teletransportador
+detecta_teleporte :-
+    ( ultimo(X, Y, D, andar), casa_frente(X, Y, D, FX, FY), dentro(FX, FY),
+      posicao(PX, PY, _), PX-PY \== FX-FY, \+ teleporte_em(FX, FY)
+    -> assertz(teleporte_em(FX, FY))
+    ;  true ).
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%  Inferencia 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 conhecida(X, Y) :- obs(X, Y, _).
 
+% casas que o agente ja sabe que deve evitar
+bloqueada(X, Y) :- inimigo_em(X, Y, _), !.
+bloqueada(X, Y) :- teleporte_em(X, Y).
+
+perigo_conhecido(inimigo, X, Y)   :- inimigo_em(X, Y, _).
+perigo_conhecido(teleporte, X, Y) :- teleporte_em(X, Y).
+
 % (X,Y) com certeza NAO tem o perigo que causa o sensor S
 % se alguma vizinha visitada NAO sentiu S
 sem(S, X, Y) :- vizinho(X, Y, A, B), obs(A, B, L), \+ memberchk(S, L), !.
 
-segura(X, Y) :- conhecida(X, Y), !, \+ inimigo_em(X, Y, _).
+% (X,Y) pode ser a causa do sensor do perigo H
+candidato(H, X, Y) :- perigo_conhecido(H, X, Y), !.
+candidato(H, X, Y) :- sensor(H, S), \+ conhecida(X, Y), \+ bloqueada(X, Y), \+ sem(S, X, Y).
+
+% Perigo H CERTO em (X,Y): ja foi descoberto, ou uma vizinha sentiu o sensor
+% de H e (X,Y) e a UNICA candidata (generaliza o antigo poco_certo)
+certo(H, X, Y) :- perigo_conhecido(H, X, Y), !.
+certo(H, X, Y) :- sensor(H, S), vizinho(X, Y, A, B), obs(A, B, L), memberchk(S, L),
+    findall(C-D, (vizinho(A, B, C, D), candidato(H, C, D)), [X-Y]), !.
+
+% o sensor de H sentido em (A,B) ja e explicado por um perigo certo
+explicada(H, A, B) :- vizinho(A, B, C, D), certo(H, C, D), !.
+
+% risco = quantos sensores de H "nao explicados" apontam para (X,Y)
+risco(H, X, Y, R) :- sensor(H, S), aggregate_all(count,
+    (vizinho(X, Y, A, B), obs(A, B, L), memberchk(S, L), \+ explicada(H, A, B)), R).
+
+segura(X, Y) :- conhecida(X, Y), !, \+ bloqueada(X, Y).
 segura(X, Y) :- sem(brisa, X, Y), sem(palmas, X, Y), sem(passos, X, Y).
+
+% nenhum perigo certo na casa
+livre(X, Y) :- \+ certo(poco, X, Y), \+ certo(inimigo, X, Y), \+ certo(teleporte, X, Y).
 
 % casas ainda nao visitadas, vizinhas de uma visitada
 fronteira(X, Y) :- map_size(MX, MY), between(1, MX, X), between(1, MY, Y),
-    \+ conhecida(X, Y), once((vizinho(X, Y, A, B), conhecida(A, B))).
+    \+ conhecida(X, Y), \+ bloqueada(X, Y),
+    once((vizinho(X, Y, A, B), conhecida(A, B))).
 
-% Poco CERTO: uma vizinha sentiu brisa e (X,Y) e a UNICA candidata
-poco_certo(X, Y) :- vizinho(X, Y, A, B), obs(A, B, L), memberchk(brisa, L),
-    findall(C-D, (vizinho(A, B, C, D), \+ conhecida(C, D), \+ sem(brisa, C, D)), [X-Y]), !.
+% energia suficiente para sobreviver ao pior inimigo
+aguenta_inimigo :- energia(E), dano_maximo(M), E > M.
 
-% a brisa sentida em (A,B) ja e explicada por um poco certo
-explicada(A, B) :- vizinho(A, B, C, D), poco_certo(C, D), !.
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%  Escolha de alvos (do mais seguro ao mais arriscado)
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-% risco = quantas brisas "nao explicadas" apontam para (X,Y)
-risco(X, Y, R) :- aggregate_all(count,
-    (vizinho(X, Y, A, B), obs(A, B, L), memberchk(brisa, L), \+ explicada(A, B)), R).
+% fica so com os alvos de menor risco
+menores(Ps, L) :- Ps \== [], keysort(Ps, [Min-_|_]), findall(P, member(Min-P, Ps), L).
 
+% 1) sem nenhum perigo possivel
 alvos_seguros(L) :- findall(X-Y, (fronteira(X, Y), segura(X, Y)), L), L \== [].
 
-alvos_arriscados(L) :-
-    findall(R-(X-Y), (fronteira(X, Y), \+ poco_certo(X, Y),
-                      sem(palmas, X, Y), sem(passos, X, Y), risco(X, Y, R)), Ps),
-    keysort(Ps, [Min-_|_]), Min =< 1,
-    findall(P, member(Min-P, Ps), L).
+% 2) talvez poco (no maximo 1 brisa nao explicada), sem inimigo/teleporte possivel
+alvos_poco(L) :-
+    findall(R-(X-Y), (fronteira(X, Y), livre(X, Y),
+                      risco(inimigo, X, Y, 0), risco(teleporte, X, Y, 0),
+                      risco(poco, X, Y, R), R =< 1), Ps),
+    menores(Ps, L).
+
+% 3) talvez inimigo: so custa energia (nao pontos), entao vale arriscar se aguentar o dano
+alvos_inimigo(L) :-
+    findall(R-(X-Y), (fronteira(X, Y), livre(X, Y),
+                      risco(poco, X, Y, 0), risco(teleporte, X, Y, 0),
+                      risco(inimigo, X, Y, R)), Ps),
+    menores(Ps, L).
+
+% 4) talvez teletransporte: leva para um lugar aleatorio (ultimo recurso)
+alvos_teleporte(L) :-
+    findall(R-(X-Y), (fronteira(X, Y), livre(X, Y), risco(poco, X, Y, 0),
+                      ( aguenta_inimigo -> true ; risco(inimigo, X, Y, 0) ),
+                      risco(teleporte, X, Y, R)), Ps),
+    menores(Ps, L).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%  Planejamento (BFS so pelo mapa conhecido)
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 caminho(Alvos, Caminho) :- posicao(X, Y, _),
     bfs([[X-Y]], [X-Y], Alvos, Rev), reverse(Rev, Caminho).
@@ -364,7 +432,7 @@ bfs([[X-Y|Ps]|Fila], Vis, Alvos, Cam) :-
     findall(N, member([N|_], Novos), Ns), append(Vis, Ns, Vis2),
     append(Fila, Novos, Fila2), bfs(Fila2, Vis2, Alvos, Cam).
 
-passavel(X, Y) :- conhecida(X, Y), \+ inimigo_em(X, Y, _).
+passavel(X, Y) :- conhecida(X, Y), \+ bloqueada(X, Y).
 
 primeiro_passo([_, NX-NY|_], Acao) :- posicao(X, Y, D),
     casa_frente(X, Y, ND, NX, NY), !, virar_para(D, ND, Acao).
@@ -376,21 +444,46 @@ virar_para(_, _, virar_direita).          % casa atras: vira duas vezes
 
 ir_para(Alvos, Acao) :- caminho(Alvos, C), primeiro_passo(C, Acao).
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%  Decisao
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+pegou_todos :- total_ouros(T), n_ouro(T).
+
 decide(pegar) :- local(brilho), !.
 decide(pegar) :- local(reflexo), energia(E), E =< 50, !.
-decide(A) :- alvos_seguros(L), ir_para(L, A), !.
-decide(A) :- alvos_arriscados(L), ir_para(L, A), !.
-decide(A) :- posicao(X, Y, _), X-Y \== 1-1, ir_para([1-1], A), !.
+% ja tem os 3 ouros: volta para a origem e encerra
+decide(sair)  :- pegou_todos, posicao(1, 1, _), !.
+decide(A)     :- pegou_todos, ir_para([1-1], A), !.
+% exploracao, do menor para o maior risco
+decide(A)     :- alvos_seguros(L), ir_para(L, A), !.
+decide(A)     :- alvos_poco(L), ir_para(L, A), !.
+decide(A)     :- alvos_inimigo(L), aguenta_inimigo, ir_para(L, A), !.
+% energia baixa para arriscar um inimigo: recarrega num item de energia conhecido
+decide(pegar) :- alvos_inimigo(_), \+ aguenta_inimigo, local(reflexo), !.
+decide(A)     :- alvos_inimigo(_), \+ aguenta_inimigo,
+                 findall(X-Y, reflexo_em(X, Y), Us), Us \== [], ir_para(Us, A), !.
+decide(A)     :- alvos_teleporte(L), ir_para(L, A), !.
+decide(A)     :- posicao(X, Y, _), X-Y \== 1-1, ir_para([1-1], A), !.
 decide(sair).
-conta(A) :- ( A == pegar, local(brilho) ->
-                retract(n_ouro(O)), O1 is O+1, assertz(n_ouro(O1)) ; true ),
+
+conta(A) :-
+    ( A == pegar, local(brilho) ->
+        retract(n_ouro(O)), O1 is O+1, assertz(n_ouro(O1)) ; true ),
+    ( A == pegar, local(reflexo), posicao(X, Y, _) ->
+        retractall(reflexo_em(X, Y)) ; true ),
     retract(n_acoes(N)), N1 is N+1, assertz(n_acoes(N1)).
 
 sair :- ( fim_de_jogo -> true ; assertz(fim_de_jogo), relatorio ).
 relatorio :- pontuacao(P), energia(E), n_ouro(O), n_acoes(N),
     format("FIM | pontuacao=~w ouro=~w energia=~w acoes=~w~n", [P, O, E, N]).
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%  Ciclo percepcao -> decisao -> acao (chamado pelo Python)
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
 executa_acao(sair) :- fim_de_jogo, !.
-executa_acao(A) :- posicao(_, _, D), D \== morto,
-    detecta_dano, perceber, decide(A), conta(A), !.
+executa_acao(A) :- posicao(X, Y, D), D \== morto,
+    detecta_teleporte, detecta_dano, perceber, decide(A), conta(A),
+    retractall(ultimo(_,_,_,_)), assertz(ultimo(X, Y, D, A)), !.
 executa_acao(sair).
